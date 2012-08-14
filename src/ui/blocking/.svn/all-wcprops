@@ -1,0 +1,17 @@
+K 25
+svn:wc:ra_dav:version-url
+V 50
+/svn/Ephisys/!svn/ver/3092/pylot/trunk/ui/blocking
+END
+__init__.py
+K 25
+svn:wc:ra_dav:version-url
+V 62
+/svn/Ephisys/!svn/ver/3092/pylot/trunk/ui/blocking/__init__.py
+END
+pylot_blocking.py
+K 25
+svn:wc:ra_dav:version-url
+V 68
+/svn/Ephisys/!svn/ver/3092/pylot/trunk/ui/blocking/pylot_blocking.py
+END

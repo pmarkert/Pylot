@@ -1,0 +1,23 @@
+K 25
+svn:wc:ra_dav:version-url
+V 45
+/svn/Ephisys/!svn/ver/3092/pylot/trunk/ui/gui
+END
+icon.ico
+K 25
+svn:wc:ra_dav:version-url
+V 54
+/svn/Ephisys/!svn/ver/3092/pylot/trunk/ui/gui/icon.ico
+END
+__init__.py
+K 25
+svn:wc:ra_dav:version-url
+V 57
+/svn/Ephisys/!svn/ver/3092/pylot/trunk/ui/gui/__init__.py
+END
+wx_gui.py
+K 25
+svn:wc:ra_dav:version-url
+V 55
+/svn/Ephisys/!svn/ver/3092/pylot/trunk/ui/gui/wx_gui.py
+END
