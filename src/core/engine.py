@@ -23,11 +23,12 @@ import re
 import socket
 import sys
 import time
-import urllib2
+import requests
 import urlparse
 from threading import Thread
 import config
 import results
+from string import Template
 
 
 
@@ -172,6 +173,8 @@ class LoadAgent(Thread):  # each Agent/VU runs in its own thread
         self.interval = interval
         self.log_msgs = log_msgs
         self.output_dir = output_dir
+        self.session = requests.session()
+        #self.session.config['keep_alive'] = False
             
         self.runtime_stats = runtime_stats  # shared stats dictionary
         self.error_queue = error_queue  # shared error list
@@ -216,16 +219,17 @@ class LoadAgent(Thread):  # each Agent/VU runs in its own thread
                     if self.running:
 
                         # send the request message
-                        resp, content, req_start_time, req_end_time, connect_end_time = self.send(req)
+                        response, content, req_start_time, req_end_time, connect_end_time = self.send(req)
 
                         # get times for logging and error display
                         tmp_time = time.localtime()
                         cur_date = time.strftime('%d %b %Y', tmp_time)
                         cur_time = time.strftime('%H:%M:%S', tmp_time)
+                        custom_output = ''
                         
                         # check verifications and status code for errors
                         is_error = False
-                        if resp.code >= 400 or resp.code == 0:
+                        if response.status_code >= 400 or response.status_code == 0:
                             is_error = True
                         if not req.verify == '':
                             if not re.search(req.verify, content, re.DOTALL): 
@@ -233,12 +237,21 @@ class LoadAgent(Thread):  # each Agent/VU runs in its own thread
                         if not req.verify_negative == '':
                             if re.search(req.verify_negative, content, re.DOTALL):
                                 is_error = True
-                    
+                        
+                        if not req.capture == '':
+                            match = re.search(req.capture, content, re.MULTILINE + re.DOTALL)
+                            if match is None:
+                                raise Exception("Error, match was none!")
+                            captures = match.groupdict()
+                        
+                        if not req.custom_output == '':
+                            custom_output = Template(req.custom_output).substitute(captures)
+                        
                         if is_error:                    
                             self.error_count += 1
-                            error_string = 'Agent %s:  %s - %d %s,  url: %s' % (self.id + 1, cur_time, resp.code, resp.msg, req.url)
+                            error_string = 'Agent %s:  %s - %d %s,  url: %s' % (self.id + 1, cur_time, response.status_code, response.reason, req.url)
                             self.error_queue.append(error_string)
-                            log_tuple = (self.id + 1, cur_date, cur_time, req_end_time, req.url.replace(',', ''), resp.code, resp.msg.replace(',', ''))
+                            log_tuple = (self.id + 1, cur_date, cur_time, req_end_time, req.url.replace(',', ''), response.status_code, response.reason.replace(',', ''))
                             self.log_error('%s,%s,%s,%s,%s,%s,%s' % log_tuple)  # write as csv
                             
                         resp_bytes = len(content)
@@ -251,11 +264,15 @@ class LoadAgent(Thread):  # each Agent/VU runs in its own thread
                         total_connect_latency += connect_latency
                         
                         # update shared stats dictionary
-                        self.runtime_stats[self.id] = StatCollection(resp.code, resp.msg, latency, self.count, self.error_count, total_latency, total_connect_latency, total_bytes)
+                        self.runtime_stats[self.id] = StatCollection(response.status_code, response.reason, latency, self.count, self.error_count, total_latency, total_connect_latency, total_bytes)
                         self.runtime_stats[self.id].agent_start_time = agent_start_time
                         
                         # put response stats/info on queue for reading by the consumer (ResultWriter) thread
-                        q_tuple = (self.id + 1, cur_date, cur_time, req_end_time, req.url.replace(',', ''), resp.code, resp.msg.replace(',', ''), resp_bytes, latency, connect_latency, req.timer_group)
+                        # PJM - Need to add a custom string which is configured and then template-interpolated for output
+                        if custom_output!='':
+                            custom_output = "," + custom_output
+                 
+                        q_tuple = (self.id + 1, cur_date, cur_time, req_end_time, req.url.replace(',', ''), response.status_code, response.reason.replace(',', ''), resp_bytes, latency, connect_latency, req.timer_group, custom_output)
                         self.results_queue.put(q_tuple)
                             
                         expire_time = (self.interval - latency)
@@ -273,53 +290,45 @@ class LoadAgent(Thread):  # each Agent/VU runs in its own thread
             
             
     def send(self, req):
-        # req is our own Request object
-        if HTTP_DEBUG:
-            opener = urllib2.build_opener(urllib2.HTTPCookieProcessor(self.cookie_jar), urllib2.HTTPHandler(debuglevel=1))
-        elif COOKIES_ENABLED:
-            opener = urllib2.build_opener(urllib2.HTTPCookieProcessor(self.cookie_jar))
-        else:
-            opener = urllib2.build_opener()
-        if req.method.upper() == 'POST':
-            request = urllib2.Request(req.url, req.body, req.headers)
-        else:  
-            request = urllib2.Request(req.url, None, req.headers)  # urllib2 assumes a GET if no data is supplied.  PUT and DELETE are not supported
-        
         # timed message send+receive (TTLB)
         req_start_time = self.default_timer()
-        try:
-            resp = opener.open(request)  # this sends the HTTP request and returns as soon as it is done connecting and sending
-            connect_end_time = self.default_timer()
-            content = resp.read()
-            req_end_time = self.default_timer()
-        except httplib.HTTPException, e:  # this can happen on an incomplete read, just catch all HTTPException
-            connect_end_time = self.default_timer()
-            resp = ErrorResponse()
-            resp.code = 0
-            resp.msg = str(e)
-            resp.headers = {}
-            content = ''
-        except urllib2.HTTPError, e:  # http responses with status >= 400
-            connect_end_time = self.default_timer()
-            resp = ErrorResponse()
-            resp.code = e.code
-            resp.msg = httplib.responses[e.code]  # constant dict of http error codes/reasons
-            resp.headers = dict(e.info())
-            content = ''
-        except urllib2.URLError, e:  # this also catches socket errors
-            connect_end_time = self.default_timer()
-            resp = ErrorResponse()
-            resp.code = 0
-            resp.msg = str(e.reason)
-            resp.headers = {}  # headers are not available in the exception
-            content = ''
+        #try:
+        if req.method.upper() == 'POST':
+            response = self.session.post(req.url, req.body, headers=req.headers)
+        else:
+            response = self.session.get(req.url, headers=req.headers)
+        connect_end_time = self.default_timer()
+        #time.sleep(1)
+        content = response.text
+        req_end_time = self.default_timer()
+        #except Exception, e:  # this can happen on an incomplete read, just catch all HTTPException
+        #    connect_end_time = self.default_timer()
+        #    #resp = ErrorResponse()
+        #    #resp.code = 0
+        #    #resp.msg = str(e)
+        #    #resp.headers = {}
+        #    content = ''
+        #except urllib2.HTTPError, e:  # http responses with status >= 400
+        #    connect_end_time = self.default_timer()
+        #    resp = ErrorResponse()
+        #    resp.code = e.code
+        #    resp.msg = httplib.responses[e.code]  # constant dict of http error codes/reasons
+        #    resp.headers = dict(e.info())
+        #    content = ''
+        #except urllib2.URLError, e:  # this also catches socket errors
+        #    connect_end_time = self.default_timer()
+        #    resp = ErrorResponse()
+        #    resp.code = 0
+        #    resp.msg = str(e.reason)
+        #    resp.headers = {}  # headers are not available in the exception
+        #    content = ''
         req_end_time = self.default_timer()
             
         if self.trace_logging:
             # log request/response messages
             self.log_http_msgs(req, request, resp, content)
             
-        return (resp, content, req_start_time, req_end_time, connect_end_time)
+        return (response, content, req_start_time, req_end_time, connect_end_time)
 
     
     def log_error(self, txt):
@@ -381,6 +390,8 @@ class Request():
         # verification string or regex
         self.verify = ''
         self.verify_negative = ''
+        self.capture = ''
+        self.custom_output = None
         
         # default unless overidden in testcase
         if 'user-agent' not in [header.lower() for header in self.headers]:
@@ -458,7 +469,7 @@ class ResultWriter(Thread):
             try:
                 q_tuple = self.results_queue.get(False)
                 f = open('%s/agent_stats.csv' % self.output_dir, 'a')
-                f.write('%s,%s,%s,%s,%s,%d,%s,%d,%f,%f,%s\n' % q_tuple)  # log as csv
+                f.write('%s,%s,%s,%s,%s,%d,%s,%d,%f,%f,%s%s\n' % q_tuple)  # log as csv
                 f.flush()
                 f.close()
             except Queue.Empty:
